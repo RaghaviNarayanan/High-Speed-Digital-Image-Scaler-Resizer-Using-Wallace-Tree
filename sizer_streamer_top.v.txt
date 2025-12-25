@@ -1,0 +1,182 @@
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date:    07:10:30 09/25/2025 
+// Design Name: 
+// Module Name:    sizer_streamer_top 
+// Project Name: 
+// Target Devices: 
+// Tool versions: 
+// Description: 
+//
+// Dependencies: 
+//
+// Revision: 
+// Revision 0.01 - File Created
+// Additional Comments: 
+//
+
+
+`timescale 1ns/1ps
+`default_nettype none
+
+module sizer_stream_top #(
+  parameter integer SRC_W     = 1909,
+  parameter integer SRC_H     = 946,
+  parameter integer DST_W     = SRC_W/2,          // 954
+  parameter integer DST_H     = SRC_H/2,          // 473
+  parameter         INIT_FILE = "/home/ise/bilenear_interpolation/img.hex"       // one-byte-per-line hex
+)(
+  input  wire        clk,
+  input  wire        rstn,
+  input  wire        start,        // pulse to begin a full frame
+  output wire [7:0]  pix_out,      // grayscale
+  output reg         pix_valid,    // 1 when pix_out is valid
+  output reg         frame_done    // 1 for one cycle at end of frame
+);
+  localparam integer AW      = 32;
+  localparam integer SRC_PIX = SRC_W*SRC_H;
+  localparam [23:0] INC_X = (SRC_W<<8) / DST_W;
+  localparam [23:0] INC_Y = (SRC_H<<8) / DST_H;
+  localparam [23:0] AX0   = (INC_X>>1) - 24'd128;   // inc/2 - 0.5 in Q8
+  localparam [23:0] AY0   = (INC_Y>>1) - 24'd128;
+  wire [7:0] rom_do;
+  reg  [AW-1:0] rom_addr;
+  
+  BMGenerator u_rom (
+  .clka(clk),
+  .addra(rom_addr[7:0]), // match to your COE depth
+  .douta(rom_do)
+);
+  wire [7:0] Q11, Q21, Q12, Q22, fx, fy, P_dut;
+  reg  [7:0] Q11_r, Q21_r, Q12_r, Q22_r;
+  reg  [7:0] fx_r, fy_r;
+  
+  bilerp_core8 u_core (
+    .Q11(Q11_r), .Q21(Q21_r), .Q12(Q12_r), .Q22(Q22_r),
+    .fx(fx_r),   .fy(fy_r),
+    .P(P_dut)
+  );
+  reg [31:0] u;           // 0..DST_W-1
+  reg [31:0] v;           // 0..DST_H-1
+  reg [23:0] ax;          // Q8 fractional accumulator for x
+  reg [23:0] ay;          // Q8 for y
+
+  wire [15:0] xi = (ax[23:8] > (SRC_W-2)) ? (SRC_W-2) : ax[23:8];
+  wire [15:0] yi = (ay[23:8] > (SRC_H-2)) ? (SRC_H-2) : ay[23:8];
+  assign fx = ax[7:0];
+  assign fy = ay[7:0];
+  wire [AW-1:0] a00 = yi*SRC_W + xi;
+  wire [AW-1:0] a10 = yi*SRC_W + (xi+1);
+  wire [AW-1:0] a01 = (yi+1)*SRC_W + xi;
+  wire [AW-1:0] a11 = (yi+1)*SRC_W + (xi+1);
+  //typedef enum reg [2:0] { IDLE, SETUP, R_Q11, R_Q21, R_Q12, R_Q22, OUT } state_t;
+  //state_t st;
+
+  // one-cycle ROM latency assumed; adjust if your BRAM differs
+  localparam [2:0]
+    IDLE  = 3'd0,
+    SETUP = 3'd1,
+    R_Q11 = 3'd2,
+    R_Q21 = 3'd3,
+    R_Q12 = 3'd4,
+    R_Q22 = 3'd5,
+    OUT   = 3'd6;
+  reg[2:0] st;
+  reg [7:0] rom_d1;
+  always @(posedge clk) rom_d1 <= rom_do;
+
+  // output wiring
+  assign pix_out = P_dut;
+  function [7:0] bz; input [7:0] v; begin bz = (^{v}===1'bx)?8'd0:v; end endfunction
+
+  always @(posedge clk) begin
+    if (!rstn) begin
+      st         <= IDLE;
+      u          <= 0;
+      v          <= 0;
+      ax         <= 0;
+      ay         <= 0;
+      rom_addr   <= 0;
+		{Q11_r,Q21_r,Q12_r,Q22_r} <= 0;
+      {fx_r,fy_r} <= 0;
+      pix_valid  <= 1'b0;
+      frame_done <= 1'b0;
+    end else begin
+      pix_valid  <= 1'b0;
+      frame_done <= 1'b0;
+      case (st)
+        IDLE: begin
+          if (start) begin
+            u  <= 0;
+            v  <= 0;
+            ax <= AX0;
+            ay <= AY0;
+				st <= SETUP;
+          end
+        end
+
+        SETUP: begin
+          // Latch current fx/fy for this (u,v)
+          fx_r <= fx;
+          fy_r <= fy;
+          // Start Q11
+          rom_addr <= a00;
+          st <= R_Q11;
+			 end
+
+        R_Q11: begin
+          Q11_r   <= rom_d1;
+          rom_addr<= a10;   // next: Q21
+          st      <= R_Q21;
+        end
+
+        R_Q21: begin
+          Q21_r   <= rom_d1;
+          rom_addr<= a01;   // next: Q12
+          st      <= R_Q12;
+        end
+		  R_Q12: begin
+          Q12_r   <= rom_d1;
+          rom_addr<= a11;   // next: Q22
+          st      <= R_Q22;
+        end
+
+        R_Q22: begin
+          Q22_r   <= rom_d1;
+          st      <= OUT;
+        end
+		  OUT: begin
+          pix_valid <= 1'b1;     // P_dut is valid now
+          // Advance to next u,v and accumulators
+          if (u == (DST_W-1)) begin
+            u  <= 0;
+            ax <= AX0;
+            if (v == (DST_H-1)) begin
+              v          <= 0;
+              ay         <= AY0;
+              frame_done <= 1'b1;
+              st         <= IDLE; 
+				  end else begin
+              v  <= v + 1;
+              ay <= ay + INC_Y;
+              st <= SETUP;
+            end
+          end else begin
+            u  <= u + 1;
+            ax <= ax + INC_X;
+            st <= SETUP;
+          end
+        end
+		  default: st <= IDLE;
+      endcase
+    end
+  end
+endmodule
+`default_nettype wire
+
+
+		  
+		  

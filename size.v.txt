@@ -1,0 +1,146 @@
+
+
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date:    12:46:22 09/24/2025 
+// Design Name: 
+// Module Name:    sizer 
+// Project Name: 
+// Target Devices: 
+// Tool versions: 
+// Description: 
+//
+// Dependencies: 
+//
+// Revision: 
+// Revision 0.01 - File Created
+// Additional Comments: 
+//
+//////////////////////////////////////////////////////////////////////////////////
+module sizer(
+    input  wire [7:0] Q11, Q21, Q12, Q22, // neighbors
+    input  wire [7:0] fx,                // frac x, Q0.8
+    input  wire [7:0] fy,                // frac y, Q0.8
+    output wire [7:0] P                  // interpolated pixel
+);
+    // Instantiate the core bilinear interpolation module
+    bilerp_core8 u_core (
+        .Q11(Q11),
+        .Q21(Q21),
+        .Q12(Q12),
+        .Q22(Q22),
+        .fx(fx),
+        .fy(fy),
+        .P(P)
+    );
+endmodule
+	 
+
+
+
+module bilerp_addrgen #(
+    parameter integer AW    = 32,   // address width
+    parameter integer WIDTH = 640   // image width (pixels per row)
+)(
+    input  wire [15:0] x,   // integer column (floor(x))
+    input  wire [15:0] y,   // integer row    (floor(y))
+    output wire [AW-1:0] add00,
+    output wire [AW-1:0] add10,
+    output wire [AW-1:0] add01,
+    output wire [AW-1:0] add11
+);
+	 // widen x,y to AW for safe math
+    wire [AW-1:0] x_w  = {{(AW-16){1'b0}}, x};
+    wire [AW-1:0] y_w  = {{(AW-16){1'b0}}, y};
+    wire [AW-1:0] x1_w = x_w + {{(AW-1){1'b0}}, 1'b1};
+    wire [AW-1:0] y1_w = y_w + {{(AW-1){1'b0}}, 1'b1};
+
+    wire [AW-1:0] row0 = y_w  * WIDTH;
+    wire [AW-1:0] row1 = y1_w * WIDTH;
+
+    assign add00 = row0 + x_w;
+    assign add10 = row0 + x1_w;
+    assign add01 = row1 + x_w;
+    assign add11 = row1 + x1_w;
+endmodule
+
+module bilerp_weights(
+    input  wire [7:0] fx,
+    input  wire [7:0] fy,
+    output wire [7:0] wx0, wx1, wy0, wy1
+);
+    localparam [7:0] ONE_Q08 = 8'd255; // Q0.8 "1.0"
+    assign wx1 = fx;
+    assign wy1 = fy;
+    assign wx0 = ONE_Q08 - fx;
+    assign wy0 = ONE_Q08 - fy;
+endmodule
+
+module wallace8(
+    input  wire [7:0] a,
+    input  wire [7:0] b,
+    output wire [15:0] p
+);
+    // ------- TEMPORARY: functional multiply (replace with your Wallace) -------
+    assign p = a*b;
+
+    // --------------------------------------------------------------------------
+endmodule
+module bilerp_horiz(
+    input  wire [7:0] Q11, Q21,
+    input  wire [7:0] Q12, Q22,
+    input  wire [7:0] wx0, wx1,   // (1-fx), fx in Q0.8
+    output wire [7:0] R1,         // top interpolated
+    output wire [7:0] R2          // bottom interpolated
+);
+	 wire [15:0] t1, t2, b1, b2;
+
+    wallace8 mul_t1(.a(Q11), .b(wx0), .p(t1));
+    wallace8 mul_t2(.a(Q21), .b(wx1), .p(t2));
+    wallace8 mul_b1(.a(Q12), .b(wx0), .p(b1));
+    wallace8 mul_b2(.a(Q22), .b(wx1), .p(b2));
+
+    wire [16:0] top_sum = {1'b0,t1} + {1'b0,t2};
+    wire [16:0] bot_sum = {1'b0,b1} + {1'b0,b2};
+
+    // round to nearest then >>8
+    assign R1 = (top_sum + 17'd128) >> 8;
+    assign R2 = (bot_sum + 17'd128) >> 8;
+endmodule
+
+module bilerp_vert(
+    input  wire [7:0] R1,
+    input  wire [7:0] R2,
+    input  wire [7:0] wy0, wy1,   // (1-fy), fy in Q0.8
+    output wire [7:0] P
+);
+    wire [15:0] v1, v2;
+
+    wallace8 mul_v1(.a(R1), .b(wy0), .p(v1));
+    wallace8 mul_v2(.a(R2), .b(wy1), .p(v2));
+
+    wire [16:0] sum = {1'b0,v1} + {1'b0,v2};
+
+    assign P = (sum + 17'd128) >> 8;
+endmodule
+
+
+module bilerp_core8(
+    input  wire [7:0] Q11, Q21, Q12, Q22,  // neighbors
+    input  wire [7:0] fx,                  // frac x, Q0.8
+    input  wire [7:0] fy,                  // frac y, Q0.8
+    output wire [7:0] P                    // interpolated pixel
+);
+
+    wire [7:0] wx0, wx1, wy0, wy1;
+    wire [7:0] R1, R2;
+
+    bilerp_weights u_w(.fx(fx), .fy(fy), .wx0(wx0), .wx1(wx1), .wy0(wy0), .wy1(wy1));
+    bilerp_horiz   u_h(.Q11(Q11), .Q21(Q21), .Q12(Q12), .Q22(Q22), .wx0(wx0), .wx1(wx1), .R1(R1), .R2(R2));
+    bilerp_vert    u_v(.R1(R1), .R2(R2), .wy0(wy0), .wy1(wy1), .P(P));
+endmodule
+
+

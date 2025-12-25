@@ -1,0 +1,105 @@
+`timescale 1ns / 1ps
+
+////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer:
+//
+// Create Date:   07:48:49 09/25/2025
+// Design Name:   sizer_stream_top
+// Module Name:   /home/ise/Image_resizer/tb_sizer_stream.v
+// Project Name:  Image_resizer
+// Target Device:  
+// Tool versions:  
+// Description: 
+//
+// Verilog Test Fixture created by ISE for module: sizer_stream_top
+//
+// Dependencies:
+// 
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+// 
+////////////////////////////////////////////////////////////////////////////////
+
+module tb_sizer_stream_top;
+  // Match the DUT params
+  localparam integer SRC_W = 1909;
+  localparam integer SRC_H = 946;
+  localparam integer DST_W = SRC_W/2;   // 954
+  localparam integer DST_H = SRC_H/2;   // 473
+
+  reg clk=0, rstn=0, start=0;
+  wire [7:0] pix_out;
+  wire       pix_valid;
+  wire       frame_done;
+  sizer_stream_top #(
+    .SRC_W(SRC_W), .SRC_H(SRC_H),
+    .DST_W(DST_W), .DST_H(DST_H),
+    .INIT_FILE("/home/ise/bilenear_interpolation/img.hex")
+  ) dut (
+    .clk(clk), .rstn(rstn), .start(start),
+    .pix_out(pix_out), .pix_valid(pix_valid), .frame_done(frame_done)
+  );
+
+  // clock
+  always #5 clk = ~clk;
+   integer fd;
+  task automatic put8(input integer f, input [7:0] b); begin $fwrite(f,"%c",b); end endtask
+  task automatic put16le(input integer f, input [15:0] w); begin put8(f,w[7:0]); put8(f,w[15:8]); end endtask
+  task automatic put32le(input integer f, input [31:0] d); begin put16le(f,d[15:0]); put16le(f,d[31:16]); end endtask
+
+  integer row_stride, padding, pixel_array_offset, file_size;
+  integer x=0, y=0, pad_i;
+
+  initial begin
+  
+    repeat(5) @(posedge clk);
+    rstn <= 1;
+    @(posedge clk);
+
+    // open BMP
+    fd = $fopen("stream_out.bmp","wb");
+    if (!fd) begin $display("ERROR: open BMP failed"); $finish; end
+    row_stride = ((DST_W*3 + 3) / 4) * 4;
+    padding    = row_stride - DST_W*3;
+    pixel_array_offset = 14 + 40;
+    file_size  = pixel_array_offset + row_stride*DST_H;
+	 put8(fd,"B"); put8(fd,"M");
+    put32le(fd,file_size);
+    put16le(fd,0); put16le(fd,0);
+    put32le(fd,pixel_array_offset);
+    put32le(fd,40);
+    put32le(fd,DST_W);
+    put32le(fd,$signed(-DST_H));   // top-down
+    put16le(fd,1); put16le(fd,24);
+    put32le(fd,0);
+    put32le(fd,row_stride*DST_H);
+    put32le(fd,2835); put32le(fd,2835);
+    put32le(fd,0); put32le(fd,0);
+	 start <= 1'b1; @(posedge clk); start <= 1'b0;
+
+    // capture stream
+    forever begin
+      @(posedge clk);
+      if (pix_valid) begin
+        // write pixel (gray -> BGR)
+        $fwrite(fd,"%c%c%c", pix_out, pix_out, pix_out);
+        x = x + 1;
+        if (x == DST_W) begin
+          // row padding
+			 for (pad_i=0; pad_i<padding; pad_i=pad_i+1) put8(fd,8'd0);
+          x = 0; y = y + 1;
+        end
+        if (y == DST_H) begin
+          $display("Stream complete. Wrote stream_out.bmp (file_size=%0d)", file_size);
+          $fclose(fd);
+          $finish;
+        end
+      end
+    end
+  end
+endmodule
+`default_nettype wire
+
+	
